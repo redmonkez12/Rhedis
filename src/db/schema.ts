@@ -1,12 +1,26 @@
-import { index, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { index, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 
 // Better Auth owns its user/account tables and migrations.
+export const halls = pgTable("halls", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  city: text("city").notNull(),
+}, (table) => [
+  unique("halls_name_city_unique").on(table.name, table.city),
+]);
+
+export const hallSeats = pgTable("hall_seats", {
+  hallId: uuid("hall_id").notNull().references(() => halls.id, { onDelete: "cascade" }),
+  seatId: text("seat_id").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.hallId, table.seatId] }),
+]);
+
 export const concerts = pgTable("concerts", {
   id: text("id").primaryKey(),
   title: text("title").notNull(),
   artist: text("artist").notNull(),
-  venue: text("venue").notNull(),
-  city: text("city").notNull(),
+  hallId: uuid("hall_id").notNull().references(() => halls.id, { onDelete: "restrict" }),
   startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
 });
 

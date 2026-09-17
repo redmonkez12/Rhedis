@@ -8,12 +8,22 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres18_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 2s
       timeout: 3s
       retries: 20
+
+  adminer:
+    image: adminer:6.0.1
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "127.0.0.1:${ADMINER_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   redis:
     image: redis:8.10.1-alpine
@@ -29,5 +39,5 @@ services:
       retries: 20
 
 volumes:
-  postgres_data:
+  postgres18_data:
   redis_data:

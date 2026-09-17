@@ -7,7 +7,7 @@ import { env } from "#src/config/env";
 import { db } from "#src/db/drizzle";
 import { popularityOutboxChannel } from "#src/db/outbox-channel";
 import { postgres } from "#src/db/postgres";
-import { concertFavorites, concerts, popularityOutbox } from "#src/db/schema";
+import { concertFavorites, concerts, halls, popularityOutbox } from "#src/db/schema";
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) throw new Error("REDIS_URL is required for integration tests");
@@ -22,14 +22,8 @@ const concertIds = [1, 2, 3, 4].map((number) => `test-${runId}-concert-${number}
 const userIds = ["alice", "bob", "carol", "dave"].map((name) => `test-${runId}-${name}`);
 const redisOnlyFavoritesKey = (userId: string) => `test:${runId}:redis-only:favorites:${userId}`;
 const redisKeys = [popularityKey, redisOnlyPopularityKey, ...userIds.map(redisOnlyFavoritesKey)];
-const concertRows = concertIds.map((id) => ({
-  id,
-  title: `Test ${id}`,
-  artist: "Test artist",
-  venue: "Test venue",
-  city: "Praha",
-  startsAt: new Date("2027-01-01T19:00:00+01:00"),
-}));
+const testHallName = `Test venue ${runId}`;
+let testHallId: string;
 let failProjectionUpdate = false;
 const routeRedis = {
   zAdd(key: string, member: { value: string; score: number }, options: { comparison: "GT" }) {
@@ -73,7 +67,18 @@ beforeAll(async () => {
       [userId, userId, `${userId}@example.test`],
     );
   }
-  await db.insert(concerts).values(concertRows);
+  const [testHall] = await db.insert(halls)
+    .values({ name: testHallName, city: "Praha" })
+    .returning({ id: halls.id });
+  if (!testHall) throw new Error("Test hall was not created");
+  testHallId = testHall.id;
+  await db.insert(concerts).values(concertIds.map((id) => ({
+    id,
+    title: `Test ${id}`,
+    artist: "Test artist",
+    hallId: testHallId,
+    startsAt: new Date("2027-01-01T19:00:00+01:00"),
+  })));
   await app.ready();
 });
 
@@ -91,6 +96,7 @@ afterAll(async () => {
   await db.delete(popularityOutbox).where(inArray(popularityOutbox.concertId, concertIds));
   await db.delete(concertFavorites).where(inArray(concertFavorites.concertId, concertIds));
   await db.delete(concerts).where(inArray(concerts.id, concertIds));
+  if (testHallId) await db.delete(halls).where(eq(halls.id, testHallId));
   await postgres.query('DELETE FROM "user" WHERE id = ANY($1::text[])', [userIds]);
   await postgres.end();
   if (testRedis.isReady) {
@@ -286,12 +292,14 @@ test("top three keeps Redis order and includes PostgreSQL concert details", asyn
   await drainTestOutbox();
 
   const response = await app.inject({ method: "GET", url: "/api/concerts/popular" });
-  const top = response.json() as Array<{ id: string; title: string; favoritesCount: number }>;
+  const top = response.json() as Array<{ id: string; title: string; venue: string; city: string; favoritesCount: number }>;
 
   expect(response.statusCode).toBe(200);
   expect(top.map((concert) => concert.id)).toEqual([concertIds[1]!, concertIds[3]!, concertIds[0]!]);
   expect(top.map((concert) => concert.favoritesCount)).toEqual([3, 2, 1]);
   expect(top[0]?.title).toBe(`Test ${concertIds[1]}`);
+  expect(top[0]?.venue).toBe(testHallName);
+  expect(top[0]?.city).toBe("Praha");
 });
 
 test("leaderboard can be rebuilt from PostgreSQL after Redis data is lost", async () => {

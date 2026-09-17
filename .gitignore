@@ -5,3 +5,4 @@ node_modules/
 dist/
 cookies.txt
 .idea
+http-client.private.env.json

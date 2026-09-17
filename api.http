@@ -1,0 +1,41 @@
+# Select the "local" environment in WebStorm, then run signIn once.
+# WebStorm sends the saved session cookie with later requests automatically.
+# Change email/concertId in http-client.env.json and password in the private file.
+
+### Health
+# @name health
+GET {{baseUrl}}/health
+
+### Sign in as a seeded demo user
+# @name signIn
+POST {{baseUrl}}/api/auth/sign-in/email
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+### Current user (requires sign-in)
+# @name me
+GET {{baseUrl}}/api/me
+
+### Top three popular concerts
+# @name popularConcerts
+GET {{baseUrl}}/api/concerts/popular
+
+### Add a PostgreSQL-backed favorite (requires sign-in)
+# @name addFavorite
+PUT {{baseUrl}}/api/me/favorites/{{concertId}}
+
+### Add a Redis-only favorite (requires sign-in)
+# @name addRedisFavorite
+PUT {{baseUrl}}/api/me/redis-favorites/{{concertId}}
+
+### Sign out
+# @name signOut
+POST {{baseUrl}}/api/auth/sign-out
+Origin: {{baseUrl}}
+Content-Type: application/json
+
+{}
