@@ -1,0 +1,35 @@
+{
+  "name": "redis-ticketing-practice",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#src/*": "./src/*.ts"
+  },
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "auth:migrate": "bunx --bun auth migrate --config src/auth/auth.ts --yes",
+    "db:generate": "bunx --bun drizzle-kit generate",
+    "db:migrate": "bunx --bun drizzle-kit migrate",
+    "db:seed": "bun src/db/seed.ts",
+    "db:rebuild-popularity": "bun src/db/rebuild-popularity.ts",
+    "worker:outbox": "bun src/workers/popularity-outbox.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "better-auth": "^1.7.5",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.12.5",
+    "pg": "^8.23.0",
+    "redis": "^6.2.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@types/pg": "^8.23.1",
+    "auth": "1.7.5",
+    "drizzle-kit": "^0.31.4",
+    "typescript": "^7.0.2"
+  }
+}
