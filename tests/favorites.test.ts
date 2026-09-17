@@ -7,7 +7,7 @@ import { env } from "#src/config/env";
 import { db } from "#src/db/drizzle";
 import { popularityOutboxChannel } from "#src/db/outbox-channel";
 import { postgres } from "#src/db/postgres";
-import { concertFavorites, concerts, halls, popularityOutbox } from "#src/db/schema";
+import { concertFavorites, concerts, halls, hallSeats, popularityOutbox } from "#src/db/schema";
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) throw new Error("REDIS_URL is required for integration tests");
@@ -21,9 +21,16 @@ const redisOnlyPopularityKey = `test:${runId}:redis-only:concerts:popularity`;
 const concertIds = [1, 2, 3, 4].map((number) => `test-${runId}-concert-${number}`);
 const userIds = ["alice", "bob", "carol", "dave"].map((name) => `test-${runId}-${name}`);
 const redisOnlyFavoritesKey = (userId: string) => `test:${runId}:redis-only:favorites:${userId}`;
-const redisKeys = [popularityKey, redisOnlyPopularityKey, ...userIds.map(redisOnlyFavoritesKey)];
+const reservationKey = (concertId: string, seatId: string) => `test:${runId}:concert:${concertId}:seat:${seatId}:reservation`;
+const redisKeys = [
+  popularityKey,
+  redisOnlyPopularityKey,
+  ...userIds.map(redisOnlyFavoritesKey),
+  ...concertIds.flatMap((concertId) => ["A1", "A2", "A3"].map((seatId) => reservationKey(concertId, seatId))),
+];
 const testHallName = `Test venue ${runId}`;
 let testHallId: string;
+let otherHallId: string;
 let failProjectionUpdate = false;
 const routeRedis = {
   zAdd(key: string, member: { value: string; score: number }, options: { comparison: "GT" }) {
@@ -31,6 +38,8 @@ const routeRedis = {
     return testRedis.zAdd(key, member, options);
   },
   zRangeWithScores: testRedis.zRangeWithScores.bind(testRedis),
+  set: testRedis.set.bind(testRedis),
+  ttl: testRedis.ttl.bind(testRedis),
   eval: testRedis.eval.bind(testRedis),
   multi: testRedis.multi.bind(testRedis),
 };
@@ -40,6 +49,7 @@ mock.module("#src/redis/keys", () => ({
   concertsPopularity: () => popularityKey,
   redisOnlyFavoritesKey,
   redisOnlyConcertsPopularity: () => redisOnlyPopularityKey,
+  seatReservationKey: reservationKey,
 }));
 mock.module("#src/auth/session", () => ({
   requireSession: async (request: FastifyRequest) => {
@@ -53,11 +63,15 @@ mock.module("#src/auth/session", () => ({
 
 const { registerMeRoute } = await import("../src/routes/me");
 const { registerConcertsRoute } = await import("../src/routes/concerts");
+const { registerReservationsRoute } = await import("../src/routes/reservations");
 const { rebuildConcertPopularity, syncConcertPopularity } = await import("../src/services/popularity");
 const { processNextPopularityOutboxEvent } = await import("../src/services/popularity-outbox");
 const app = Fastify({ logger: false });
-registerMeRoute(app);
-registerConcertsRoute(app);
+app.register(async (v1) => {
+  registerMeRoute(v1);
+  registerConcertsRoute(v1);
+  registerReservationsRoute(v1);
+}, { prefix: "/api/v1" });
 
 beforeAll(async () => {
   await testRedis.connect();
@@ -72,6 +86,16 @@ beforeAll(async () => {
     .returning({ id: halls.id });
   if (!testHall) throw new Error("Test hall was not created");
   testHallId = testHall.id;
+  const [otherHall] = await db.insert(halls)
+    .values({ name: `Other venue ${runId}`, city: "Brno" })
+    .returning({ id: halls.id });
+  if (!otherHall) throw new Error("Other test hall was not created");
+  otherHallId = otherHall.id;
+  await db.insert(hallSeats).values([
+    { hallId: testHallId, seatId: "A1" },
+    { hallId: testHallId, seatId: "A2" },
+    { hallId: otherHallId, seatId: "A3" },
+  ]);
   await db.insert(concerts).values(concertIds.map((id) => ({
     id,
     title: `Test ${id}`,
@@ -97,6 +121,7 @@ afterAll(async () => {
   await db.delete(concertFavorites).where(inArray(concertFavorites.concertId, concertIds));
   await db.delete(concerts).where(inArray(concerts.id, concertIds));
   if (testHallId) await db.delete(halls).where(eq(halls.id, testHallId));
+  if (otherHallId) await db.delete(halls).where(eq(halls.id, otherHallId));
   await postgres.query('DELETE FROM "user" WHERE id = ANY($1::text[])', [userIds]);
   await postgres.end();
   if (testRedis.isReady) {
@@ -110,7 +135,7 @@ afterAll(async () => {
 function putFavorite(userId: string, concertId: string) {
   return app.inject({
     method: "PUT",
-    url: `/api/me/favorites/${concertId}`,
+    url: `/api/v1/me/favorites/${concertId}`,
     headers: { "x-test-user-id": userId },
   });
 }
@@ -118,7 +143,7 @@ function putFavorite(userId: string, concertId: string) {
 function putRedisOnlyFavorite(userId: string, concertId: string) {
   return app.inject({
     method: "PUT",
-    url: `/api/me/redis-favorites/${concertId}`,
+    url: `/api/v1/me/redis-favorites/${concertId}`,
     headers: { "x-test-user-id": userId },
   });
 }
@@ -241,11 +266,13 @@ test("unknown concert returns 404 without creating a favorite", async () => {
 });
 
 test("favorite endpoint requires a session", async () => {
-  const response = await app.inject({ method: "PUT", url: `/api/me/favorites/${concertIds[0]}` });
-  const redisOnlyResponse = await app.inject({ method: "PUT", url: `/api/me/redis-favorites/${concertIds[0]}` });
+  const response = await app.inject({ method: "PUT", url: `/api/v1/me/favorites/${concertIds[0]}` });
+  const redisOnlyResponse = await app.inject({ method: "PUT", url: `/api/v1/me/redis-favorites/${concertIds[0]}` });
+  const oldResponse = await app.inject({ method: "PUT", url: `/api/me/favorites/${concertIds[0]}` });
 
   expect(response.statusCode).toBe(401);
   expect(redisOnlyResponse.statusCode).toBe(401);
+  expect(oldResponse.statusCode).toBe(404);
   expect(await favoriteCount(concertIds[0]!)).toBe(0);
   expect(await pendingEvents(concertIds[0]!)).toBe(0);
 });
@@ -291,7 +318,7 @@ test("top three keeps Redis order and includes PostgreSQL concert details", asyn
   ]);
   await drainTestOutbox();
 
-  const response = await app.inject({ method: "GET", url: "/api/concerts/popular" });
+  const response = await app.inject({ method: "GET", url: "/api/v1/concerts/popular" });
   const top = response.json() as Array<{ id: string; title: string; venue: string; city: string; favoritesCount: number }>;
 
   expect(response.statusCode).toBe(200);
@@ -357,4 +384,59 @@ test("Redis-only sorted set ranks concerts independently", async () => {
   expect(top.map(({ value }) => value)).toEqual([concertIds[1]!, concertIds[3]!, concertIds[0]!]);
   expect(top.map(({ score }) => score)).toEqual([3, 2, 1]);
   expect(await favoriteCount(concertIds[1]!)).toBe(0);
+});
+
+function getReservationStatus(concertId: string, seatId: string, userId = userIds[0]!) {
+  return app.inject({
+    method: "GET",
+    url: `/api/v1/concerts/${concertId}/seats/${seatId}/reservation`,
+    headers: { "x-test-user-id": userId },
+  });
+}
+
+test("reservation status reports a free seat and a held seat for the correct concert", async () => {
+  const concertId = concertIds[0]!;
+  const free = await getReservationStatus(concertId, "A1");
+  expect(free.statusCode).toBe(200);
+  expect(free.json() as { reserved: boolean; remainingSeconds: number })
+    .toEqual({ reserved: false, remainingSeconds: 0 });
+
+  const created = await app.inject({
+    method: "POST",
+    url: `/api/v1/concerts/${concertId}/seats/A1/reservation`,
+    headers: { "x-test-user-id": userIds[0]! },
+  });
+  expect(created.statusCode).toBe(201);
+
+  const held = await getReservationStatus(concertId, "A1");
+  expect(held.statusCode).toBe(200);
+  expect(held.json().reserved).toBe(true);
+  expect(held.json().remainingSeconds).toBeGreaterThanOrEqual(0);
+  expect(held.json().remainingSeconds).toBeLessThanOrEqual(60);
+
+  const otherConcert = await getReservationStatus(concertIds[1]!, "A1");
+  expect(otherConcert.json() as { reserved: boolean; remainingSeconds: number })
+    .toEqual({ reserved: false, remainingSeconds: 0 });
+});
+
+test("reservation status treats a key without expiration as a server error", async () => {
+  await testRedis.set(reservationKey(concertIds[0]!, "A1"), "{}");
+
+  const response = await getReservationStatus(concertIds[0]!, "A1");
+  expect(response.statusCode).toBe(500);
+});
+
+test("reservation status requires authentication and a seat in the concert hall", async () => {
+  const concertId = concertIds[0]!;
+  const unauthorized = await app.inject({
+    method: "GET",
+    url: `/api/v1/concerts/${concertId}/seats/A1/reservation`,
+  });
+  expect(unauthorized.statusCode).toBe(401);
+
+  const wrongHall = await getReservationStatus(concertId, "A3");
+  expect(wrongHall.statusCode).toBe(404);
+
+  const missingConcert = await getReservationStatus(`missing-${runId}`, "A1");
+  expect(missingConcert.statusCode).toBe(404);
 });

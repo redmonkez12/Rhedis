@@ -18,19 +18,27 @@ Content-Type: application/json
 
 ### Current user (requires sign-in)
 # @name me
-GET {{baseUrl}}/api/me
+GET {{baseUrl}}/api/v1/me
 
 ### Top three popular concerts
 # @name popularConcerts
-GET {{baseUrl}}/api/concerts/popular
+GET {{baseUrl}}/api/v1/concerts/popular
 
 ### Add a PostgreSQL-backed favorite (requires sign-in)
 # @name addFavorite
-PUT {{baseUrl}}/api/me/favorites/{{concertId}}
+PUT {{baseUrl}}/api/v1/me/favorites/{{concertId}}
 
 ### Add a Redis-only favorite (requires sign-in)
 # @name addRedisFavorite
-PUT {{baseUrl}}/api/me/redis-favorites/{{concertId}}
+PUT {{baseUrl}}/api/v1/me/redis-favorites/{{concertId}}
+
+### Reserve seat A1 for 60 seconds (requires sign-in)
+# @name reserveSeatA1
+POST {{baseUrl}}/api/v1/concerts/{{concertId}}/seats/A1/reservation
+
+### Check the reservation status of seat A1 (requires sign-in)
+# @name seatA1ReservationStatus
+GET {{baseUrl}}/api/v1/concerts/{{concertId}}/seats/A1/reservation
 
 ### Sign out
 # @name signOut

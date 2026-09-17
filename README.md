@@ -110,12 +110,13 @@ bun run typecheck
 ## API examples
 
 These examples assume the API runs at `http://localhost:3100`.
+Application routes use the `/api/v1` prefix; Better Auth stays at `/api/auth` and health at `/health`.
 
 ### WebStorm HTTP Client
 
-Open `api.http`, choose the `local` environment, and click the green run icon next to `signIn`. After that, run `me`, `addFavorite`, `addRedisFavorite`, or `popularConcerts` with one click. WebStorm saves the session cookie and sends it to the same local API automatically.
+Open `api.http`, choose the `local` environment, and click the green run icon next to `signIn`. After that, run `me`, `addFavorite`, `addRedisFavorite`, `popularConcerts`, `reserveSeatA1`, or `seatA1ReservationStatus` with one click. WebStorm saves the session cookie and sends it to the same local API automatically.
 
-Edit `http-client.env.json` to change the API URL, demo email, or concert ID. The password is in the Git-ignored `http-client.private.env.json`; change it there if your seeded users have a different password. If the API is not running yet, start it with `bun run dev`. The seat reservation endpoint is still unfinished, so it is not included in the runnable requests.
+Edit `http-client.env.json` to change the API URL, demo email, or concert ID. The password is in the Git-ignored `http-client.private.env.json`; change it there if your seeded users have a different password. If the API is not running yet, start it with `bun run dev`. Run `reserveSeatA1` before `seatA1ReservationStatus` to see the remaining time.
 
 ### cURL
 
@@ -132,14 +133,14 @@ If you seeded with `SEED_USER_PASSWORD`, use that password instead.
 Read the current user:
 
 ```bash
-curl -b cookies.txt http://localhost:3100/api/me
+curl -b cookies.txt http://localhost:3100/api/v1/me
 ```
 
 Add a concert to favorites:
 
 ```bash
 curl -X PUT -b cookies.txt \
-  http://localhost:3100/api/me/favorites/concert-01
+  http://localhost:3100/api/v1/me/favorites/concert-01
 ```
 
 Repeat the request to check that the popularity score does not increase again.
