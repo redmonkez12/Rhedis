@@ -8,7 +8,7 @@ Built as a hands-on learning project for the **Redis Associate Developer certifi
 
 The first exercise is complete: ten sample concerts, user favorites, and a top-three popularity ranking. Adding the same concert to a user's favorites again does not increase its score.
 
-Temporary seat reservations are the next exercise. This is a learning project under active development.
+Temporary seat reservations are available under `/api/v1`. This is a learning project under active development.
 
 ## Stack
 
@@ -19,7 +19,7 @@ Temporary seat reservations are the next exercise. This is a learning project un
 | Fastify | HTTP API |
 | Better Auth | Authentication and session handling |
 | PostgreSQL | Authentication, concerts, halls, seats, and favorites |
-| Redis | Favorites, rankings, and upcoming reservation exercises |
+| Redis | Favorites, rankings, and temporary seat reservations |
 | node-redis (`redis`) | Redis client for JavaScript and TypeScript |
 | Docker Compose | Local infrastructure |
 
@@ -33,6 +33,7 @@ The target local environment is **Redis 8**. This is a project choice, not a cla
 - Popularity ranking based on the number of users who added a concert to their favorites.
 - Top-three concert lookup.
 - An atomic Redis operation that adds a favorite and increments popularity only when that favorite is new.
+- Temporary seat reservations with a 60-second expiration and a status endpoint.
 
 ## Halls and seats
 
@@ -50,7 +51,7 @@ The following names illustrate the key convention; the application's key helpers
 | --- | --- | --- |
 | `app:user:<userId>:favorites` | Set | Unique concert IDs favorited by a user |
 | `app:concerts:popularity` | Sorted set | Concert IDs scored by favorite count |
-| `app:concert:<concertId>:seat:<seatId>:reservation` | String, planned | Serialized reservation with an expiration |
+| `app:concert:<concertId>:seat:<seatId>:reservation` | String | Serialized reservation with a 60-second expiration |
 
 ### Favorites and popularity
 
@@ -107,6 +108,14 @@ Run TypeScript checks, assuming the skeleton's `typecheck` script is present:
 bun run typecheck
 ```
 
+Run integration tests with PostgreSQL and Redis available:
+
+```bash
+bun run test
+```
+
+The test command creates a separate temporary PostgreSQL database, applies the Better Auth and Drizzle migrations, runs the tests, and removes the database afterward. The database user in `DATABASE_URL` needs permission to create databases. Redis test keys use a unique prefix. The development outbox worker can keep running because it cannot read the temporary test database. Run tests through this command rather than calling `bun test` directly.
+
 ## API examples
 
 These examples assume the API runs at `http://localhost:3100`.
@@ -145,15 +154,18 @@ curl -X PUT -b cookies.txt \
 
 Repeat the request to check that the popularity score does not increase again.
 
-## Next exercise: temporary seat reservations
+## Temporary seat reservations
 
-- Reserve an existing seat for 60 seconds.
-- Use a single `SET` operation with `NX` and `EX`.
-- Store the authenticated user's ID and a unique reservation ID.
-- Return `201` for a new reservation and `409` if the seat is already held.
-- Keep the existing expiration unchanged when a reservation attempt is rejected.
-- Expose the remaining reservation time.
-- Allow the seat to be reserved again after expiration.
+Both endpoints require a Better Auth session and a seat belonging to the concert's hall:
+
+```text
+POST /api/v1/concerts/:concertId/seats/:seatId/reservation
+GET  /api/v1/concerts/:concertId/seats/:seatId/reservation
+```
+
+The POST stores the authenticated user's ID and a unique reservation ID as a JSON string in Redis. One `SET` with `NX` and `EX 60` creates the hold and its expiration atomically. It returns `201` with `reservationId`, or `409` when the seat is already held, including by the same user. A rejected attempt does not extend the existing hold.
+
+The GET returns `reserved` and `remainingSeconds` from Redis `TTL`. A missing key (`-2`) means the seat is free; a key without expiration (`-1`) is treated as a server error. Once the key expires, another POST can reserve the seat. The unversioned `/api/concerts/...` path is intentionally not exposed.
 
 This exercise models temporary holds only. Payments and permanent ticket ownership are outside its scope.
 
@@ -167,9 +179,9 @@ These are expected behaviors to verify, not a report of automated test results.
 - [ ] Concurrent duplicate requests create only one favorite contribution.
 - [ ] The ranking returns the three highest-scoring concerts, or fewer if fewer are ranked.
 - [ ] Unauthenticated favorite requests are rejected.
-- [ ] Planned: simultaneous requests for the same free seat have exactly one winner.
-- [ ] Planned: rejected requests do not refresh reservation TTL.
-- [ ] Planned: an expired reservation no longer blocks a new one.
+- [ ] Simultaneous requests for the same free seat have exactly one winner.
+- [ ] Rejected requests do not refresh reservation TTL.
+- [ ] An expired reservation no longer blocks a new one.
 
 ## Further learning goals
 

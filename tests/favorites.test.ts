@@ -9,6 +9,12 @@ import { popularityOutboxChannel } from "#src/db/outbox-channel";
 import { postgres } from "#src/db/postgres";
 import { concertFavorites, concerts, halls, hallSeats, popularityOutbox } from "#src/db/schema";
 
+const testDatabaseName = process.env.REDIS_PRACTICE_TEST_DATABASE;
+if (!/^redis_practice_test_[0-9a-f]{32}$/.test(testDatabaseName ?? "")
+  || new URL(env.databaseUrl).pathname !== `/${testDatabaseName}`) {
+  throw new Error("Run integration tests with bun run test to use an isolated database");
+}
+
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) throw new Error("REDIS_URL is required for integration tests");
 
@@ -394,6 +400,14 @@ function getReservationStatus(concertId: string, seatId: string, userId = userId
   });
 }
 
+function postReservation(userId: string, concertId: string, seatId: string) {
+  return app.inject({
+    method: "POST",
+    url: `/api/v1/concerts/${concertId}/seats/${seatId}/reservation`,
+    headers: { "x-test-user-id": userId },
+  });
+}
+
 test("reservation status reports a free seat and a held seat for the correct concert", async () => {
   const concertId = concertIds[0]!;
   const free = await getReservationStatus(concertId, "A1");
@@ -401,11 +415,7 @@ test("reservation status reports a free seat and a held seat for the correct con
   expect(free.json() as { reserved: boolean; remainingSeconds: number })
     .toEqual({ reserved: false, remainingSeconds: 0 });
 
-  const created = await app.inject({
-    method: "POST",
-    url: `/api/v1/concerts/${concertId}/seats/A1/reservation`,
-    headers: { "x-test-user-id": userIds[0]! },
-  });
+  const created = await postReservation(userIds[0]!, concertId, "A1");
   expect(created.statusCode).toBe(201);
 
   const held = await getReservationStatus(concertId, "A1");
@@ -439,4 +449,74 @@ test("reservation status requires authentication and a seat in the concert hall"
 
   const missingConcert = await getReservationStatus(`missing-${runId}`, "A1");
   expect(missingConcert.statusCode).toBe(404);
+});
+
+test("duplicate reservations return 409 without changing the value or extending TTL", async () => {
+  const concertId = concertIds[0]!;
+  const key = reservationKey(concertId, "A1");
+  const first = await postReservation(userIds[0]!, concertId, "A1");
+  expect(first.statusCode).toBe(201);
+
+  const firstValue = await testRedis.get(key);
+  expect(firstValue).not.toBeNull();
+  expect(JSON.parse(firstValue!) as { userId: string; reservationId: string }).toEqual({
+    userId: userIds[0]!,
+    reservationId: first.json().reservationId,
+  });
+  const ttlBefore = await testRedis.pTTL(key);
+  expect(ttlBefore).toBeGreaterThan(0);
+  expect(ttlBefore).toBeLessThanOrEqual(60_000);
+
+  await Bun.sleep(50);
+  const sameUser = await postReservation(userIds[0]!, concertId, "A1");
+  const otherUser = await postReservation(userIds[1]!, concertId, "A1");
+  expect(sameUser.statusCode).toBe(409);
+  expect(otherUser.statusCode).toBe(409);
+  expect(await testRedis.get(key)).toBe(firstValue);
+  expect(await testRedis.pTTL(key)).toBeLessThan(ttlBefore);
+
+  const otherSeat = await postReservation(userIds[1]!, concertId, "A2");
+  expect(otherSeat.statusCode).toBe(201);
+});
+
+test("an expired reservation can be acquired again", async () => {
+  const concertId = concertIds[0]!;
+  const key = reservationKey(concertId, "A1");
+  const first = await postReservation(userIds[0]!, concertId, "A1");
+  expect(first.statusCode).toBe(201);
+
+  await testRedis.pExpire(key, 20);
+  await Bun.sleep(60);
+  expect(await testRedis.ttl(key)).toBe(-2);
+
+  const second = await postReservation(userIds[1]!, concertId, "A1");
+  expect(second.statusCode).toBe(201);
+  expect(second.json().reservationId).not.toBe(first.json().reservationId);
+  expect(await testRedis.ttl(key)).toBeGreaterThan(0);
+});
+
+test("twenty concurrent reservation requests have one winner", async () => {
+  const concertId = concertIds[0]!;
+  const responses = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+    postReservation(userIds[index % userIds.length]!, concertId, "A1")));
+
+  expect(responses.filter(({ statusCode }) => statusCode === 201)).toHaveLength(1);
+  expect(responses.filter(({ statusCode }) => statusCode === 409)).toHaveLength(19);
+  const winner = responses.find(({ statusCode }) => statusCode === 201)!;
+  const value = await testRedis.get(reservationKey(concertId, "A1"));
+  expect(JSON.parse(value!) as { reservationId: string }).toMatchObject({
+    reservationId: winner.json().reservationId,
+  });
+});
+
+test("reservation POST requires authentication and an existing concert seat", async () => {
+  const concertId = concertIds[0]!;
+  const unauthenticated = await app.inject({
+    method: "POST",
+    url: `/api/v1/concerts/${concertId}/seats/A1/reservation`,
+  });
+  expect(unauthenticated.statusCode).toBe(401);
+  expect((await postReservation(userIds[0]!, concertId, "A3")).statusCode).toBe(404);
+  expect((await postReservation(userIds[0]!, `missing-${runId}`, "A1")).statusCode).toBe(404);
+  expect(await testRedis.get(reservationKey(concertId, "A1"))).toBeNull();
 });

@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts",
-    "test": "bun test",
+    "test": "bun scripts/run-tests.ts",
     "typecheck": "tsc --noEmit",
     "auth:migrate": "bunx --bun auth migrate --config src/auth/auth.ts --yes",
     "db:generate": "bunx --bun drizzle-kit generate",
