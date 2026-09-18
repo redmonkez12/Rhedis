@@ -20,7 +20,7 @@ Temporary seat reservations are available under `/api/v1`. This is a learning pr
 | LogTape | Structured application and HTTP logging |
 | Better Auth | Authentication and session handling |
 | PostgreSQL | Authentication, concerts, halls, seats, and favorites |
-| Redis | Favorites, rankings, and temporary seat reservations |
+| Redis | Favorites, rankings, temporary seat reservations, and recent activity |
 | node-redis (`redis`) | Redis client for JavaScript and TypeScript |
 | Docker Compose | Local infrastructure |
 
@@ -35,6 +35,7 @@ The target local environment is **Redis 8**. This is a project choice, not a cla
 - Top-three concert lookup.
 - An atomic Redis operation that adds a favorite and increments popularity only when that favorite is new.
 - Temporary seat reservations with a 60-second expiration and a status endpoint.
+- The authenticated user's 20 most recent successful actions.
 - Public concert detail cached in Redis for 60 seconds.
 
 ### Concert detail cache
@@ -75,6 +76,7 @@ The following names illustrate the key convention; the application's key helpers
 | `app:concerts:popularity` | Sorted set | Concert IDs scored by favorite count |
 | `app:concert:<concertId>:seat:<seatId>:reservation` | String | Serialized reservation with a 60-second expiration |
 | `app:cache:concert:<concertId>` | String | Serialized concert detail with a 60-second expiration |
+| `app:user:<userId>:activity` | List | The 20 most recent activities, newest first |
 
 ### Favorites and popularity
 
@@ -88,6 +90,14 @@ Other clients cannot interleave commands during script execution. This keeps suc
 **Atomic execution does not provide rollback:** if a script fails after a write, earlier writes are not automatically undone. Key types and script inputs must be valid before dependent writes run.
 
 The user's identity comes from the verified session, rather than a user ID supplied in the request body.
+
+### Recent activity
+
+`GET /api/v1/me/activities?offset=0&limit=10` returns the signed-in user's activities, newest first. `offset` defaults to 0 and `limit` to 10 (maximum 20). An empty list returns `[]`. Each entry has a unique `id`, a `type` (`favorite_added`, `reservation_created`, or `reservation_cancelled`), `concertId`, and ISO `createdAt` timestamp. Adding either kind of favorite records an activity only when it was newly added. Successful reservation creation and cancellation also record activities; duplicate favorites, occupied seats, and rejected cancellations do not.
+
+For each activity, Redis runs `LPUSH` followed by `LTRIM key 0 19` in one `MULTI/EXEC` transaction. `LRANGE key offset (offset + limit - 1)` reads a page. The transaction prevents concurrent writers from leaving more than 20 entries.
+
+This bounded list is **not a complete audit history**: `LTRIM` permanently discards older entries, Redis data can be evicted or lost, and writing the activity after the underlying PostgreSQL or reservation operation is not part of the same transaction. If the history write fails, the successful action still returns success and the missing entry is logged. Use a durable event log or database table when every action must be retained and reconstructable.
 
 ## Local development
 
@@ -148,7 +158,7 @@ Application routes use the `/api/v1` prefix; Better Auth stays at `/api/auth` an
 
 ### WebStorm HTTP Client
 
-Open `api.http`, choose the `local` environment, and click the green run icon next to `signIn`. After that, run `me`, `addFavorite`, `addRedisFavorite`, `popularConcerts`, `reserveSeatA1`, or `seatA1ReservationStatus` with one click. WebStorm saves the session cookie and sends it to the same local API automatically.
+Open `api.http`, choose the `local` environment, and click the green run icon next to `signIn`. After that, run `me`, `addFavorite`, `addRedisFavorite`, `recentActivities`, `popularConcerts`, `reserveSeatA1`, or `seatA1ReservationStatus` with one click. WebStorm saves the session cookie and sends it to the same local API automatically.
 
 Edit `http-client.env.json` to change the API URL, demo email, or concert ID. The password is in the Git-ignored `http-client.private.env.json`; change it there if your seeded users have a different password. If the API is not running yet, start it with `bun run dev`. Run `reserveSeatA1` before `seatA1ReservationStatus` to see the remaining time.
 
@@ -211,6 +221,8 @@ These are expected behaviors to verify, not a report of automated test results.
 - [ ] Rejected requests do not refresh reservation TTL.
 - [ ] An expired reservation no longer blocks a new one.
 - [ ] Canceling an expired reservation does not remove a newer hold.
+- [ ] After 25 activity writes, only activities 25–6 remain; pages of 10 return 25–16 and 15–6.
+- [ ] Users without activity get `[]`, users' histories stay separate, and concurrent writes retain at most 20 entries.
 
 ## Further learning goals
 

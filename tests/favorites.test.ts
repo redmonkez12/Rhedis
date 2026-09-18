@@ -29,12 +29,14 @@ const concertIds = [1, 2, 3, 4].map((number) => `test-${runId}-concert-${number}
 const userIds = ["alice", "bob", "carol", "dave"].map((name) => `test-${runId}-${name}`);
 const redisOnlyFavoritesKey = (userId: string) => `test:${runId}:redis-only:favorites:${userId}`;
 const reservationKey = (concertId: string, seatId: string) => `test:${runId}:concert:${concertId}:seat:${seatId}:reservation`;
+const activityKey = (userId: string) => `test:${runId}:user:${userId}:activity`;
 const layoutKey = (hallId: string) => `test:${runId}:venue:${hallId}:layout`;
 const concertCacheKey = (concertId: string) => `app:cache:concert:${concertId}`;
 const redisKeys = [
   popularityKey,
   redisOnlyPopularityKey,
   ...userIds.map(redisOnlyFavoritesKey),
+  ...userIds.map(activityKey),
   ...concertIds.flatMap((concertId) => ["A1", "A2", "A3", "B2"].map((seatId) => reservationKey(concertId, seatId))),
   ...concertIds.map(concertCacheKey),
 ];
@@ -65,6 +67,7 @@ const routeRedis = {
   ttl: testRedis.ttl.bind(testRedis),
   eval: testRedis.eval.bind(testRedis),
   multi: testRedis.multi.bind(testRedis),
+  lRange: testRedis.lRange.bind(testRedis),
   json: {
     get: testRedis.json.get.bind(testRedis.json),
     set: testRedis.json.set.bind(testRedis.json),
@@ -83,6 +86,7 @@ mock.module("#src/redis/keys", () => ({
   seatReservationKey: reservationKey,
   layoutKey,
   concertCacheKey,
+  userActivityKey: activityKey,
 }));
 mock.module("#src/auth/session", () => ({
   requireSession: async (request: FastifyRequest) => {
@@ -98,6 +102,7 @@ const { registerMeRoute } = await import("../src/routes/me");
 const { registerConcertsRoute } = await import("../src/routes/concerts");
 const { registerHallsRoute } = await import("../src/routes/halls");
 const { registerReservationsRoute } = await import("../src/routes/reservations");
+const { recordActivity, getRecentActivities } = await import("../src/services/activity");
 const { rebuildConcertPopularity, syncConcertPopularity } = await import("../src/services/popularity");
 const { processNextPopularityOutboxEvent } = await import("../src/services/popularity-outbox");
 const { getConcertDetailPostgresReadCount } = await import("../src/services/concert");
@@ -231,6 +236,74 @@ test("repeated favorite creates one PostgreSQL row and one leaderboard point", a
   expect(await testRedis.zScore(popularityKey, concertIds[0]!)).toBe(0);
   expect(await drainTestOutbox()).toBe(1);
   expect(await testRedis.zScore(popularityKey, concertIds[0]!)).toBe(1);
+  const activities = await getRecentActivities(userIds[0]!, 0, 10);
+  expect(activities).toHaveLength(1);
+  expect(activities[0]).toMatchObject({ type: "favorite_added", concertId: concertIds[0]! });
+  expect(activities[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(Number.isNaN(Date.parse(activities[0]!.createdAt))).toBe(false);
+});
+
+test("25 activities keep the newest 20 and paginate newest first", async () => {
+  const userId = userIds[0]!;
+  for (let number = 1; number <= 25; number++) {
+    await recordActivity(userId, {
+      id: `activity-${number}`, type: "favorite_added", concertId: concertIds[0]!,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  expect(await testRedis.lLen(activityKey(userId))).toBe(20);
+  expect((await getRecentActivities(userId, 0, 10)).map(({ id }) => id))
+    .toEqual(Array.from({ length: 10 }, (_, index) => `activity-${25 - index}`));
+  expect((await getRecentActivities(userId, 10, 10)).map(({ id }) => id))
+    .toEqual(Array.from({ length: 10 }, (_, index) => `activity-${15 - index}`));
+  expect(await getRecentActivities(userId, 20, 10)).toEqual([]);
+  expect(await getRecentActivities(userIds[1]!, 0, 10)).toEqual([]);
+});
+
+test("activities are isolated by user and concurrent writes remain capped at 20", async () => {
+  const [alice, bob] = userIds;
+  await Promise.all(Array.from({ length: 60 }, (_, number) =>
+    recordActivity(alice!, {
+      id: `alice-${number}`, type: "favorite_added", concertId: concertIds[0]!,
+      createdAt: new Date().toISOString(),
+    }),
+  ));
+  await recordActivity(bob!, {
+    id: "bob-1", type: "reservation_created", concertId: concertIds[1]!,
+    createdAt: new Date().toISOString(),
+  });
+
+  expect(await testRedis.lLen(activityKey(alice!))).toBe(20);
+  expect(new Set((await getRecentActivities(alice!, 0, 20)).map(({ id }) => id)).size).toBe(20);
+  expect((await getRecentActivities(bob!, 0, 10)).map(({ id }) => id)).toEqual(["bob-1"]);
+});
+
+test("activity endpoint requires authentication and validates pagination", async () => {
+  const url = "/api/v1/me/activities";
+  expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
+  const empty = await app.inject({ method: "GET", url, headers: { "x-test-user-id": userIds[0]! } });
+  expect(empty.statusCode).toBe(200);
+  expect(empty.json() as unknown[]).toEqual([]);
+
+  await putFavorite(userIds[0]!, concertIds[0]!);
+  const page = await app.inject({ method: "GET", url: `${url}?offset=0&limit=10`, headers: { "x-test-user-id": userIds[0]! } });
+  expect(page.statusCode).toBe(200);
+  expect(page.json()).toMatchObject([{ type: "favorite_added", concertId: concertIds[0]! }]);
+  const invalid = await app.inject({ method: "GET", url: `${url}?offset=-1&limit=10`, headers: { "x-test-user-id": userIds[0]! } });
+  expect(invalid.statusCode).toBe(400);
+});
+
+test("a failed history write does not report a committed favorite as failed", async () => {
+  const userId = userIds[0]!;
+  await testRedis.set(activityKey(userId), "wrong Redis type");
+
+  const response = await putFavorite(userId, concertIds[0]!);
+
+  expect(response.statusCode).toBe(200);
+  expect(response.json() as { added: boolean }).toEqual({ added: true });
+  expect(await favoriteCount(concertIds[0]!)).toBe(1);
+  expect(await testRedis.type(activityKey(userId))).toBe("string");
 });
 
 test("a new outbox event wakes PostgreSQL listeners", async () => {
@@ -270,6 +343,7 @@ test("concurrent favorites from one user remain idempotent", async () => {
   expect(await pendingEvents(concertIds[0]!)).toBe(1);
   await drainTestOutbox();
   expect(await testRedis.zScore(popularityKey, concertIds[0]!)).toBe(1);
+  expect(await getRecentActivities(userIds[0]!, 0, 10)).toHaveLength(1);
 });
 
 test("two users create two favorites", async () => {
@@ -311,6 +385,7 @@ test("unknown concert returns 404 without creating a favorite", async () => {
   expect(await testRedis.zScore(popularityKey, missingId)).toBeNull();
   expect(await testRedis.sIsMember(redisOnlyFavoritesKey(userIds[0]!), missingId)).toBe(0);
   expect(await testRedis.zScore(redisOnlyPopularityKey, missingId)).toBeNull();
+  expect(await getRecentActivities(userIds[0]!, 0, 10)).toEqual([]);
 });
 
 test("favorite endpoint requires a session", async () => {
@@ -592,6 +667,8 @@ test("Redis-only favorite is idempotent and does not write to PostgreSQL", async
   expect(await favoriteCount(concertIds[0]!)).toBe(0);
   expect(await pendingEvents(concertIds[0]!)).toBe(0);
   expect(await testRedis.zScore(popularityKey, concertIds[0]!)).toBe(0);
+  expect((await getRecentActivities(userIds[0]!, 0, 10)).map(({ type }) => type))
+    .toEqual(["favorite_added"]);
 });
 
 test("concurrent Redis-only favorites from one user increase the score once", async () => {
@@ -780,6 +857,9 @@ test("only the owner can cancel an existing reservation", async () => {
   expect((await deleteReservation(userIds[0]!, concertId, "A1", reservationId)).statusCode).toBe(204);
   expect(await testRedis.get(key)).toBeNull();
   expect((await deleteReservation(userIds[0]!, concertId, "A1", reservationId)).statusCode).toBe(404);
+  expect((await getRecentActivities(userIds[0]!, 0, 10)).map(({ type, concertId: id }) => [type, id]))
+    .toEqual([["reservation_cancelled", concertId], ["reservation_created", concertId]]);
+  expect(await getRecentActivities(userIds[1]!, 0, 10)).toEqual([]);
 });
 
 test("canceling an expired reservation does not delete a newer hold by the same owner", async () => {

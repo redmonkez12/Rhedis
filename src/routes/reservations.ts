@@ -4,6 +4,7 @@ import { requireConcert, requireSeat } from "#src/routes/require-entities";
 import { pathParamsSchema } from "#src/routes/params-schema";
 import { redis } from "#src/db/redis";
 import { seatReservationKey } from "#src/redis/keys";
+import { recordCompletedActivity } from "#src/services/activity";
 
 const cancelReservationScript = `
     local value = redis.call("GET", KEYS[1])
@@ -45,6 +46,7 @@ export function registerReservationsRoute(app: FastifyInstance): void {
             return res.code(409).send({ error: "Seat already reserved"})
         }
 
+        await recordCompletedActivity(session.user.id, "reservation_created", concertId);
         return res.code(201).send({ reservationId });
     });
 
@@ -96,6 +98,7 @@ export function registerReservationsRoute(app: FastifyInstance): void {
             throw new Error(`Unexpected reservation cancellation result: ${result}`);
         }
 
+        await recordCompletedActivity(session.user.id, "reservation_cancelled", concertId);
         return res.code(204).send();
     });
 }

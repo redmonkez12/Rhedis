@@ -46,6 +46,10 @@ PUT {{baseUrl}}/api/v1/me/favorites/{{concertId}}
 # @name addRedisFavorite
 PUT {{baseUrl}}/api/v1/me/redis-favorites/{{concertId}}
 
+### View recent activity (requires sign-in)
+# @name recentActivities
+GET {{baseUrl}}/api/v1/me/activities?offset=0&limit=10
+
 ### Reserve seat A1 for 60 seconds (requires sign-in)
 # @name reserveSeatA1
 POST {{baseUrl}}/api/v1/concerts/{{concertId}}/seats/A1/reservation

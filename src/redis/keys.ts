@@ -5,3 +5,4 @@ export const seatReservationKey = (concertId: string, seatId: string) =>
   `app:concert:${encodeURIComponent(concertId)}:seat:${encodeURIComponent(seatId)}:reservation`;
 export const layoutKey = (hallId: string) => `app:venue:${hallId}:layout`;
 export const concertCacheKey = (concertId: string) => `app:cache:concert:${concertId}`;
+export const userActivityKey = (userId: string) => `app:user:${userId}:activity`;
