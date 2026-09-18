@@ -6,7 +6,7 @@ Built as a hands-on learning project for the **Redis Associate Developer certifi
 
 ## Project status
 
-The first exercise is complete: ten sample concerts, user favorites, and a top-three popularity ranking. Adding the same concert to a user's favorites again does not increase its score.
+The first exercise is complete: ten sample concerts, user favorites, and a top-three popularity ranking. Adding the same concert to a user's favorites again does not increase its score. A separate script demonstrates pipelines and optimistic ticket purchases with `WATCH`.
 
 Temporary seat reservations are available under `/api/v1`. This is a learning project under active development.
 
@@ -216,8 +216,16 @@ These are expected behaviors to verify, not a report of automated test results.
 
 - Model nested venue layouts with RedisJSON.
 - Practice cache-aside reads and invalidation.
-- Compare pipelines, transactions, and Lua scripts.
+- Compare transactions and Lua scripts.
 - Explore persistence, eviction, and recovery behavior.
+
+## Pipelines and transactions exercise
+
+Run `bun run redis:pipelines-transactions` with Redis running and `REDIS_URL` set (for example, via `.env`). The script writes 1,000 identical test concerts under each of `app:exercise:pipelines-transactions:sequential` and `app:exercise:pipelines-transactions:pipeline`, measures the two write loops, and verifies every stored value. The measured time excludes verification; it is a local comparison, not a guaranteed speedup.
+
+It then resets `app:exercise:pipelines-transactions:tickets:last-tickets:{available,sold}` to 10 and 0 and starts 50 simultaneous purchases. `buyTicket(concertId)` uses a dedicated pool connection for `WATCH`, the stock read, and `MULTI/EXEC`, with at most 50 attempts per purchase. The output distinguishes purchases, sold-out responses, and attempts exhausted by conflicts. The script checks that stock is nonnegative, `available = 10 - purchases`, and `sold = purchases`; a failed check exits with an error. The exercise keys remain in Redis for inspection, and a later run overwrites them.
+
+`execAsPipeline()` batches commands to reduce round trips but provides no isolation between clients. `exec()` executes a Redis transaction; paired with `WATCH`, it aborts if another client changes the observed ticket state before the transaction commits.
 
 ## Resources
 

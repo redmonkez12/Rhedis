@@ -16,6 +16,7 @@
     "db:seed": "bun src/db/seed.ts",
     "db:rebuild-popularity": "bun src/db/rebuild-popularity.ts",
     "venue:seed-layout": "bun scripts/seed-venue-layout.ts",
+    "redis:pipelines-transactions": "bun scripts/pipelines-transactions.ts",
     "worker:outbox": "bun src/workers/popularity-outbox.ts"
   },
   "dependencies": {
