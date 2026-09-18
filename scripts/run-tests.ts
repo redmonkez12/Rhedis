@@ -1,4 +1,9 @@
+import { getLogger } from "@logtape/logtape";
 import { Client } from "pg";
+import { configureLogging } from "#src/logging";
+
+const logger = getLogger(["redis-practice", "script", "run-tests"]);
+configureLogging();
 
 const databaseUrl = process.env.DATABASE_URL;
 if (!databaseUrl) throw new Error("DATABASE_URL is required for integration tests");
@@ -38,7 +43,7 @@ try {
   await run(["run", "db:migrate"]);
   await run(["test", ...process.argv.slice(2)]);
 } catch (error) {
-  console.error(error);
+  logger.error("Integration test setup or execution failed", { error });
   process.exitCode = 1;
 } finally {
   try {
@@ -46,7 +51,7 @@ try {
       await admin.query(`DROP DATABASE "${testDatabaseName}" WITH (FORCE)`);
     }
   } catch (error) {
-    console.error("Could not remove temporary test database:", error);
+    logger.error("Could not remove temporary test database", { error });
     process.exitCode = 1;
   } finally {
     await admin.end();

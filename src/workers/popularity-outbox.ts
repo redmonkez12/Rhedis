@@ -1,11 +1,14 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { getLogger } from "@logtape/logtape";
 import { Client } from "pg";
 import { env } from "#src/config/env";
 import { popularityOutboxChannel } from "#src/db/outbox-channel";
 import { postgres } from "#src/db/postgres";
 import { redis } from "#src/db/redis";
+import { configureLogging } from "#src/logging";
 import { processNextPopularityOutboxEvent } from "#src/services/popularity-outbox";
 
+const logger = getLogger(["redis-practice", "worker", "popularity-outbox"]);
 const fallbackPollMs = 30_000;
 const retryMs = 1_000;
 
@@ -67,7 +70,7 @@ async function runListenerSession(signal: AbortSignal): Promise<void> {
     if (message.channel === popularityOutboxChannel) wake.notify();
   });
   listener.on("error", (error) => {
-    if (!signal.aborted) console.error("Outbox listener connection lost:", error);
+    if (!signal.aborted) logger.error("Outbox listener connection lost", { error });
     onDisconnect();
   });
   listener.on("end", onDisconnect);
@@ -79,7 +82,7 @@ async function runListenerSession(signal: AbortSignal): Promise<void> {
     // LISTEN must be active before the first outbox scan.
     const channel = '"' + popularityOutboxChannel.replace(/"/g, '""') + '"';
     await listener.query(`LISTEN ${channel}`);
-    console.info("Popularity outbox listener ready.");
+    logger.info("Popularity outbox listener ready");
 
     while (isRunning()) {
       const observedVersion = wake.version;
@@ -89,7 +92,7 @@ async function runListenerSession(signal: AbortSignal): Promise<void> {
         if (await processNextPopularityOutboxEvent()) continue;
       } catch (error) {
         if (!isRunning()) break;
-        console.error("Outbox delivery failed; will retry:", error);
+        logger.error("Outbox delivery failed; will retry", { error });
         await waitBeforeRetry(signal);
         continue;
       }
@@ -99,7 +102,7 @@ async function runListenerSession(signal: AbortSignal): Promise<void> {
     }
   } finally {
     await listener.end().catch((error) => {
-      console.error("Could not close outbox listener:", error);
+      logger.error("Could not close outbox listener", { error });
     });
   }
 }
@@ -114,13 +117,14 @@ async function closeConnections(): Promise<void> {
   ]);
   for (const result of results) {
     if (result.status === "rejected") {
-      console.error("Could not close worker connection:", result.reason);
+      logger.error("Could not close worker connection", { error: result.reason });
       process.exitCode = 1;
     }
   }
 }
 
 async function main(): Promise<void> {
+  configureLogging();
   const shutdown = new AbortController();
   const stop = () => shutdown.abort();
   process.on("SIGINT", stop);
@@ -133,13 +137,13 @@ async function main(): Promise<void> {
         await runListenerSession(shutdown.signal);
       } catch (error) {
         if (!shutdown.signal.aborted) {
-          console.error("Outbox listener failed; will reconnect:", error);
+          logger.error("Outbox listener failed; will reconnect", { error });
         }
       }
       if (!shutdown.signal.aborted) await waitBeforeRetry(shutdown.signal);
     }
   } catch (error) {
-    console.error("Popularity outbox worker failed:", error);
+    logger.error("Popularity outbox worker failed", { error });
     process.exitCode = 1;
   } finally {
     try {

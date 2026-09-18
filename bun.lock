@@ -5,6 +5,8 @@
     "": {
       "dependencies": {
         "@fastify/cors": "^11.3.0",
+        "@logtape/fastify": "^2.2.8",
+        "@logtape/logtape": "^2.3.5",
         "better-auth": "^1.7.5",
         "drizzle-orm": "^0.45.2",
         "fastify": "^5.12.5",
@@ -200,6 +202,10 @@
     "@jridgewell/sourcemap-codec": ["@jridgewell/sourcemap-codec@1.6.0", "", {}, "sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw=="],
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
+
+    "@logtape/fastify": ["@logtape/fastify@2.2.8", "", { "peerDependencies": { "@logtape/logtape": "^2.2.8" } }, "sha512-3pjVu7B4e/E5BSxxFVK4APlpVDX5uhhra3r2fR7To2zHJN6QJVVWFNlLZ+XJm5JPK5y6zdoPNlnou3ghOL2xUQ=="],
+
+    "@logtape/logtape": ["@logtape/logtape@2.3.5", "", {}, "sha512-s4LlalG0JO2Fg8ENy1aQVdOS47VOD2pip6mOW29TNuCxW5zOhrQk/ck/xs77M7O15b2pK2KnDSr7L0Tf6LIUXg=="],
 
     "@mrleebo/prisma-ast": ["@mrleebo/prisma-ast@0.16.0", "", { "dependencies": { "chevrotain": "^12.0.0", "lilconfig": "^2.1.0" } }, "sha512-a9ELYNIflEQP38tSu6gnUgSAWgXjuhMvC52868K5sWgyRmYsjiJMWTUmm8iy7hZT5EN2ZKVydMTFP2q3/+6ccg=="],
 

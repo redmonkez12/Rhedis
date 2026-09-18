@@ -17,6 +17,7 @@ Temporary seat reservations are available under `/api/v1`. This is a learning pr
 | TypeScript | Application code |
 | Bun | Runtime and package management |
 | Fastify | HTTP API |
+| LogTape | Structured application and HTTP logging |
 | Better Auth | Authentication and session handling |
 | PostgreSQL | Authentication, concerts, halls, seats, and favorites |
 | Redis | Favorites, rankings, and temporary seat reservations |
@@ -34,6 +35,21 @@ The target local environment is **Redis 8**. This is a project choice, not a cla
 - Top-three concert lookup.
 - An atomic Redis operation that adds a favorite and increments popularity only when that favorite is new.
 - Temporary seat reservations with a 60-second expiration and a status endpoint.
+- Public concert detail cached in Redis for 60 seconds.
+
+### Concert detail cache
+
+`GET /api/v1/concerts/:concertId` first checks `app:cache:concert:<id>`. On a miss, it reads PostgreSQL and caches a found concert for 60 seconds. Missing concerts return `404` and are not cached. LogTape records `cache hit`, `cache miss`, and each PostgreSQL detail read with a process-local `detailPostgresReads` count. The count resets when the process restarts.
+
+An authorized venue admin can change a concert's title, start time, or both with `PATCH /api/v1/concerts/:concertId` and a JSON body such as `{ "title": "New title", "startsAt": "2027-02-02T20:30:00Z" }`. The PostgreSQL transaction commits before the endpoint deletes that concert's Redis cache key. The next sequential GET misses the cache and reads the updated detail. A missing concert returns `404` without deleting a cache entry.
+
+TTL limits how long a cached detail can remain without another write; invalidation makes a sequential read see an update immediately after the commit. Neither guarantees consistency when requests overlap. The integration test reproduces this order:
+
+1. Reader A misses the cache and reads the old title from PostgreSQL, then pauses before writing to Redis.
+2. Request B commits a new title in PostgreSQL and deletes the cache key.
+3. Reader A resumes and writes its old snapshot to Redis with a fresh 60-second TTL. A later GET returns the old title even though PostgreSQL contains the new one.
+
+Deleting the key cannot cancel a read already in flight. This exercise demonstrates the race but does not prevent it. If Redis deletion fails after a commit, the cached value can also remain until its TTL expires. A test checks the initial 60-second TTL and shortens it to one second to exercise expiration without making every test wait a full minute.
 
 ## Halls and seats
 
@@ -58,6 +74,7 @@ The following names illustrate the key convention; the application's key helpers
 | `app:user:<userId>:favorites` | Set | Unique concert IDs favorited by a user |
 | `app:concerts:popularity` | Sorted set | Concert IDs scored by favorite count |
 | `app:concert:<concertId>:seat:<seatId>:reservation` | String | Serialized reservation with a 60-second expiration |
+| `app:cache:concert:<concertId>` | String | Serialized concert detail with a 60-second expiration |
 
 ### Favorites and popularity
 
@@ -91,6 +108,8 @@ cp .env.example .env
 ```
 
 Configure the PostgreSQL and Redis connection URLs, Better Auth secret and base URL, and any allowed frontend origin. Use a generated secret and keep `.env` out of version control.
+
+LogTape writes JSON lines to the console for the API, worker, and maintenance scripts. Set `LOG_LEVEL` in `.env` to `trace`, `debug`, `info` (default), `warning`, `error`, or `fatal` to control verbosity.
 
 Start the databases:
 

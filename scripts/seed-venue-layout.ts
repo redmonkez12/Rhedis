@@ -1,10 +1,13 @@
+import { getLogger } from "@logtape/logtape";
 import { and, eq } from "drizzle-orm";
 import { db } from "#src/db/drizzle";
 import { postgres } from "#src/db/postgres";
 import { redis } from "#src/db/redis";
 import { halls, hallSeats } from "#src/db/schema";
 import { layoutKey } from "#src/redis/keys";
+import { configureLogging } from "#src/logging";
 
+const logger = getLogger(["redis-practice", "script", "seed-venue-layout"]);
 const hallCity = "Praha";
 
 const layout = {
@@ -26,6 +29,8 @@ const layout = {
   ],
 };
 
+configureLogging();
+
 try {
   const hallId = await db.transaction(async (tx) => {
     await tx.insert(halls).values({ name: layout.name, city: hallCity }).onConflictDoNothing();
@@ -46,7 +51,7 @@ try {
   await redis.connect();
   const key = layoutKey(hallId);
   await redis.json.set(key, "$", layout);
-  console.info(`Venue layout saved to ${key} (Main Hall, ${hallCity})`);
+  logger.info("Venue layout saved", { key, hall: layout.name, city: hallCity });
 } finally {
   const redisClose = redis.isReady ? redis.quit() : (redis.isOpen ? redis.destroy() : undefined);
   await Promise.all([postgres.end(), redisClose]);

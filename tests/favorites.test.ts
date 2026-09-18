@@ -30,24 +30,38 @@ const userIds = ["alice", "bob", "carol", "dave"].map((name) => `test-${runId}-$
 const redisOnlyFavoritesKey = (userId: string) => `test:${runId}:redis-only:favorites:${userId}`;
 const reservationKey = (concertId: string, seatId: string) => `test:${runId}:concert:${concertId}:seat:${seatId}:reservation`;
 const layoutKey = (hallId: string) => `test:${runId}:venue:${hallId}:layout`;
+const concertCacheKey = (concertId: string) => `app:cache:concert:${concertId}`;
 const redisKeys = [
   popularityKey,
   redisOnlyPopularityKey,
   ...userIds.map(redisOnlyFavoritesKey),
   ...concertIds.flatMap((concertId) => ["A1", "A2", "A3", "B2"].map((seatId) => reservationKey(concertId, seatId))),
+  ...concertIds.map(concertCacheKey),
 ];
 const testHallName = `Test venue ${runId}`;
 let testHallId: string;
 let otherHallId: string;
 let failProjectionUpdate = false;
 let failSeatAppend = false;
+let pauseConcertCacheWrite: ((key: string, value: string) => Promise<void>) | undefined;
+let observeConcertCacheDelete: ((key: string) => Promise<void>) | undefined;
 const routeRedis = {
   zAdd(key: string, member: { value: string; score: number }, options: { comparison: "GT" }) {
     if (failProjectionUpdate) return Promise.reject(new Error("Simulated Redis update failure"));
     return testRedis.zAdd(key, member, options);
   },
   zRangeWithScores: testRedis.zRangeWithScores.bind(testRedis),
-  set: testRedis.set.bind(testRedis),
+  get: testRedis.get.bind(testRedis),
+  async set(key: string, value: string, options?: { EX?: number; NX?: boolean }) {
+    if (pauseConcertCacheWrite && key.startsWith("app:cache:concert:")) {
+      await pauseConcertCacheWrite(key, value);
+    }
+    return testRedis.set(key, value, options);
+  },
+  async del(key: string) {
+    if (observeConcertCacheDelete) await observeConcertCacheDelete(key);
+    return testRedis.del(key);
+  },
   ttl: testRedis.ttl.bind(testRedis),
   eval: testRedis.eval.bind(testRedis),
   multi: testRedis.multi.bind(testRedis),
@@ -68,6 +82,7 @@ mock.module("#src/redis/keys", () => ({
   redisOnlyConcertsPopularity: () => redisOnlyPopularityKey,
   seatReservationKey: reservationKey,
   layoutKey,
+  concertCacheKey,
 }));
 mock.module("#src/auth/session", () => ({
   requireSession: async (request: FastifyRequest) => {
@@ -85,6 +100,7 @@ const { registerHallsRoute } = await import("../src/routes/halls");
 const { registerReservationsRoute } = await import("../src/routes/reservations");
 const { rebuildConcertPopularity, syncConcertPopularity } = await import("../src/services/popularity");
 const { processNextPopularityOutboxEvent } = await import("../src/services/popularity-outbox");
+const { getConcertDetailPostgresReadCount } = await import("../src/services/concert");
 const app = Fastify({ logger: false });
 app.register(async (v1) => {
   registerMeRoute(v1);
@@ -131,6 +147,8 @@ beforeAll(async () => {
 beforeEach(async () => {
   failProjectionUpdate = false;
   failSeatAppend = false;
+  pauseConcertCacheWrite = undefined;
+  observeConcertCacheDelete = undefined;
   await db.delete(popularityOutbox).where(inArray(popularityOutbox.concertId, concertIds));
   await db.delete(concertFavorites).where(inArray(concertFavorites.concertId, concertIds));
   await db.delete(hallSeats).where(and(
@@ -335,6 +353,195 @@ test("redelivered event sets the count instead of incrementing it twice", async 
   expect(await drainTestOutbox()).toBe(1);
   expect(await favoriteCount(concertIds[0]!)).toBe(1);
   expect(await testRedis.zScore(popularityKey, concertIds[0]!)).toBe(1);
+});
+
+test("concert detail is read from PostgreSQL once and then from the 60-second cache", async () => {
+  const concertId = concertIds[0]!;
+  const url = `/api/v1/concerts/${concertId}`;
+  const readsBefore = getConcertDetailPostgresReadCount();
+
+  const first = await app.inject({ method: "GET", url });
+  expect(first.statusCode).toBe(200);
+  expect(first.json().title).toBe(`Test ${concertId}`);
+  expect(getConcertDetailPostgresReadCount()).toBe(readsBefore + 1);
+  expect(await testRedis.ttl(concertCacheKey(concertId))).toBeGreaterThan(0);
+  expect(await testRedis.ttl(concertCacheKey(concertId))).toBeLessThanOrEqual(60);
+
+  for (let index = 0; index < 5; index++) {
+    const cached = await app.inject({ method: "GET", url });
+    expect(cached.statusCode).toBe(200);
+    expect(cached.json()).toEqual(first.json());
+  }
+  expect(getConcertDetailPostgresReadCount()).toBe(readsBefore + 1);
+});
+
+test("concert detail is read from PostgreSQL again after cache expiration", async () => {
+  const concertId = concertIds[0]!;
+  const url = `/api/v1/concerts/${concertId}`;
+  const readsBefore = getConcertDetailPostgresReadCount();
+
+  expect((await app.inject({ method: "GET", url })).statusCode).toBe(200);
+  expect(getConcertDetailPostgresReadCount()).toBe(readsBefore + 1);
+  await testRedis.expire(concertCacheKey(concertId), 1);
+  await Bun.sleep(1_100);
+  expect(await testRedis.exists(concertCacheKey(concertId))).toBe(0);
+
+  expect((await app.inject({ method: "GET", url })).statusCode).toBe(200);
+  expect(getConcertDetailPostgresReadCount()).toBe(readsBefore + 2);
+});
+
+test("missing concert returns 404 and is never cached", async () => {
+  const concertId = `test-${runId}-missing-detail`;
+  const readsBefore = getConcertDetailPostgresReadCount();
+
+  for (let index = 0; index < 2; index++) {
+    const response = await app.inject({ method: "GET", url: `/api/v1/concerts/${concertId}` });
+    expect(response.statusCode).toBe(404);
+    expect((response.json() as { error: string }).error).toBe("Concert not found");
+    expect(await testRedis.exists(concertCacheKey(concertId))).toBe(0);
+  }
+  expect(getConcertDetailPostgresReadCount()).toBe(readsBefore + 2);
+});
+
+test("concert title and date updates invalidate the cache after PostgreSQL commit", async () => {
+  const concertId = concertIds[0]!;
+  const cacheKey = concertCacheKey(concertId);
+  const url = `/api/v1/concerts/${concertId}`;
+  const originalTitle = `Test ${concertId}`;
+  const originalStartsAt = new Date("2027-01-01T19:00:00+01:00");
+  const newTitle = `Updated ${concertId}`;
+  const newStartsAt = "2027-02-02T20:30:00.000Z";
+  const readsBefore = getConcertDetailPostgresReadCount();
+  let committedTitleAtInvalidation: string | undefined;
+
+  try {
+    expect((await app.inject({ method: "GET", url })).statusCode).toBe(200);
+    expect(await testRedis.exists(cacheKey)).toBe(1);
+    observeConcertCacheDelete = async (key) => {
+      if (key !== cacheKey) return;
+      const [concert] = await db.select({ title: concerts.title })
+        .from(concerts).where(eq(concerts.id, concertId));
+      committedTitleAtInvalidation = concert?.title;
+    };
+
+    const titleUpdate = await app.inject({
+      method: "PATCH", url,
+      headers: { "x-test-user-id": userIds[0]! },
+      payload: { title: newTitle },
+    });
+    expect(titleUpdate.statusCode).toBe(204);
+    expect(committedTitleAtInvalidation).toBe(newTitle);
+    expect(await testRedis.exists(cacheKey)).toBe(0);
+
+    const afterTitleUpdate = await app.inject({ method: "GET", url });
+    expect(afterTitleUpdate.statusCode).toBe(200);
+    expect(afterTitleUpdate.json().title).toBe(newTitle);
+    expect(getConcertDetailPostgresReadCount()).toBe(readsBefore + 2);
+
+    const dateUpdate = await app.inject({
+      method: "PATCH", url,
+      headers: { "x-test-user-id": userIds[0]! },
+      payload: { startsAt: newStartsAt },
+    });
+    expect(dateUpdate.statusCode).toBe(204);
+    expect(await testRedis.exists(cacheKey)).toBe(0);
+
+    const afterDateUpdate = await app.inject({ method: "GET", url });
+    expect(afterDateUpdate.statusCode).toBe(200);
+    expect(afterDateUpdate.json().title).toBe(newTitle);
+    expect(afterDateUpdate.json().startsAt).toBe(newStartsAt);
+    expect(getConcertDetailPostgresReadCount()).toBe(readsBefore + 3);
+  } finally {
+    observeConcertCacheDelete = undefined;
+    await db.update(concerts).set({ title: originalTitle, startsAt: originalStartsAt })
+      .where(eq(concerts.id, concertId));
+    await testRedis.del(cacheKey);
+  }
+});
+
+test("concert update requires an admin and leaves a missing concert uncached", async () => {
+  const concertId = `test-${runId}-missing-update`;
+  const url = `/api/v1/concerts/${concertId}`;
+
+  expect((await app.inject({ method: "PATCH", url, payload: { title: "New" } })).statusCode).toBe(401);
+  expect((await app.inject({
+    method: "PATCH", url,
+    headers: { "x-test-user-id": userIds[1]! },
+    payload: { title: "New" },
+  })).statusCode).toBe(403);
+  expect((await app.inject({
+    method: "PATCH", url,
+    headers: { "x-test-user-id": userIds[0]! },
+    payload: { title: "New" },
+  })).statusCode).toBe(404);
+  expect(await testRedis.exists(concertCacheKey(concertId))).toBe(0);
+});
+
+test("concert update rejects empty fields and invalid dates", async () => {
+  const url = `/api/v1/concerts/${concertIds[0]}`;
+  const headers = { "x-test-user-id": userIds[0]! };
+
+  for (const payload of [{}, { title: "   " }, { startsAt: "not-a-date" }]) {
+    const response = await app.inject({ method: "PATCH", url, headers, payload });
+    expect(response.statusCode).toBe(400);
+  }
+  expect(await testRedis.exists(concertCacheKey(concertIds[0]!))).toBe(0);
+});
+
+test("an in-flight reader can repopulate invalidated cache with stale concert detail", async () => {
+  const concertId = concertIds[0]!;
+  const cacheKey = concertCacheKey(concertId);
+  const url = `/api/v1/concerts/${concertId}`;
+  const originalTitle = `Test ${concertId}`;
+  const updatedTitle = `Updated during read ${concertId}`;
+  let reachedCacheWrite!: () => void;
+  let releaseCacheWrite!: () => void;
+  const cacheWriteReached = new Promise<void>((resolve) => { reachedCacheWrite = resolve; });
+  const cacheWriteReleased = new Promise<void>((resolve) => { releaseCacheWrite = resolve; });
+  let capturedOldTitle: string | undefined;
+  let paused = false;
+
+  pauseConcertCacheWrite = async (key, value) => {
+    if (key !== cacheKey || paused) return;
+    paused = true;
+    capturedOldTitle = (JSON.parse(value) as { title: string }).title;
+    reachedCacheWrite();
+    await cacheWriteReleased;
+  };
+
+  const pendingRead = app.inject({ method: "GET", url });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Reader did not reach the cache write")), 3_000);
+      void cacheWriteReached.then(() => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    expect(capturedOldTitle).toBe(originalTitle);
+
+    const update = await app.inject({
+      method: "PATCH", url,
+      headers: { "x-test-user-id": userIds[0]! },
+      payload: { title: updatedTitle },
+    });
+    expect(update.statusCode).toBe(204);
+    expect(await testRedis.exists(cacheKey)).toBe(0);
+    const [committed] = await db.select({ title: concerts.title })
+      .from(concerts).where(eq(concerts.id, concertId));
+    expect(committed?.title).toBe(updatedTitle);
+
+    releaseCacheWrite();
+    expect((await pendingRead).json().title).toBe(originalTitle);
+    expect((await app.inject({ method: "GET", url })).json().title).toBe(originalTitle);
+    expect((JSON.parse((await testRedis.get(cacheKey))!) as { title: string }).title).toBe(originalTitle);
+  } finally {
+    pauseConcertCacheWrite = undefined;
+    releaseCacheWrite();
+    await pendingRead;
+    await db.update(concerts).set({ title: originalTitle }).where(eq(concerts.id, concertId));
+    await testRedis.del(cacheKey);
+  }
 });
 
 test("top three keeps Redis order and includes PostgreSQL concert details", async () => {

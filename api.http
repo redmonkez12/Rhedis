@@ -24,6 +24,20 @@ GET {{baseUrl}}/api/v1/me
 # @name popularConcerts
 GET {{baseUrl}}/api/v1/concerts/popular
 
+### Concert detail (public; cached for 60 seconds)
+# @name concertDetail
+GET {{baseUrl}}/api/v1/concerts/{{concertId}}
+
+### Update concert title or start time (requires venue admin sign-in)
+# @name updateConcert
+PATCH {{baseUrl}}/api/v1/concerts/{{concertId}}
+Content-Type: application/json
+
+{
+  "title": "Nový název",
+  "startsAt": "2027-02-02T20:30:00Z"
+}
+
 ### Add a PostgreSQL-backed favorite (requires sign-in)
 # @name addFavorite
 PUT {{baseUrl}}/api/v1/me/favorites/{{concertId}}

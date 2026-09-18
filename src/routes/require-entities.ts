@@ -1,4 +1,4 @@
-import { getConcert } from "#src/services/concert";
+import { getConcertDetail } from "#src/services/concert";
 import { getSeat } from "#src/services/seat";
 
 export async function requireSeat(concertId: string, seatId: string) {
@@ -11,7 +11,7 @@ export async function requireSeat(concertId: string, seatId: string) {
 }
 
 export async function requireConcert(concertId: string) {
-    const concert = await getConcert(concertId);
+    const concert = await getConcertDetail(concertId);
     if (!concert) {
         throw Object.assign(new Error("Concert not found"), { statusCode: 404 });
     }

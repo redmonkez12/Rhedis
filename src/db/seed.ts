@@ -1,11 +1,15 @@
+import { getLogger } from "@logtape/logtape";
 import { auth } from "#src/auth/auth";
 import { db } from "#src/db/drizzle";
 import { postgres } from "#src/db/postgres";
 import { redis } from "#src/db/redis";
 import { concerts, halls, hallSeats } from "#src/db/schema";
 import { redisOnlyConcertsPopularity } from "#src/redis/keys";
+import { configureLogging } from "#src/logging";
 import { rebuildConcertPopularity } from "#src/services/popularity";
 import { inArray } from "drizzle-orm";
+
+const logger = getLogger(["redis-practice", "script", "seed"]);
 
 // Fictional concerts with stable IDs, so the seed can be run repeatedly.
 const seedConcerts = [
@@ -48,6 +52,8 @@ async function seedDemoUsers(): Promise<number> {
   return created;
 }
 
+configureLogging();
+
 try {
   if (process.env.NODE_ENV === "production") {
     throw new Error("Demo seed must not run with NODE_ENV=production");
@@ -77,7 +83,13 @@ try {
     { condition: "NX" },
   );
   const createdUsers = await seedDemoUsers();
-  console.info(`Seed complete (${seedHalls.length} halls, ${seedHalls.length * seatIds.length} seats, ${seedConcerts.length} demo concerts, ${seedUsers.length} demo users, ${createdUsers} newly created).`);
+  logger.info("Seed complete", {
+    halls: seedHalls.length,
+    seats: seedHalls.length * seatIds.length,
+    concerts: seedConcerts.length,
+    users: seedUsers.length,
+    newlyCreatedUsers: createdUsers,
+  });
 } finally {
   const redisClose = redis.isReady ? redis.quit() : (redis.isOpen ? redis.destroy() : undefined);
   await Promise.all([postgres.end(), redisClose]);
