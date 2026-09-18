@@ -408,6 +408,14 @@ function postReservation(userId: string, concertId: string, seatId: string) {
   });
 }
 
+function deleteReservation(userId: string, concertId: string, seatId: string, reservationId: string) {
+  return app.inject({
+    method: "DELETE",
+    url: `/api/v1/concerts/${concertId}/seats/${seatId}/reservations/${reservationId}`,
+    headers: { "x-test-user-id": userId },
+  });
+}
+
 test("reservation status reports a free seat and a held seat for the correct concert", async () => {
   const concertId = concertIds[0]!;
   const free = await getReservationStatus(concertId, "A1");
@@ -519,4 +527,43 @@ test("reservation POST requires authentication and an existing concert seat", as
   expect((await postReservation(userIds[0]!, concertId, "A3")).statusCode).toBe(404);
   expect((await postReservation(userIds[0]!, `missing-${runId}`, "A1")).statusCode).toBe(404);
   expect(await testRedis.get(reservationKey(concertId, "A1"))).toBeNull();
+});
+
+test("only the owner can cancel an existing reservation", async () => {
+  const concertId = concertIds[0]!;
+  const key = reservationKey(concertId, "A1");
+  const created = await postReservation(userIds[0]!, concertId, "A1");
+  const reservationId = created.json().reservationId as string;
+  const value = await testRedis.get(key);
+
+  const unauthenticated = await app.inject({
+    method: "DELETE",
+    url: `/api/v1/concerts/${concertId}/seats/A1/reservations/${reservationId}`,
+  });
+  expect(unauthenticated.statusCode).toBe(401);
+  expect((await deleteReservation(userIds[0]!, concertId, "A1", crypto.randomUUID())).statusCode).toBe(409);
+  expect((await deleteReservation(userIds[1]!, concertId, "A1", reservationId)).statusCode).toBe(403);
+  expect((await deleteReservation(userIds[1]!, concertId, "A1", crypto.randomUUID())).statusCode).toBe(403);
+  expect(await testRedis.get(key)).toBe(value);
+
+  expect((await deleteReservation(userIds[0]!, concertId, "A1", reservationId)).statusCode).toBe(204);
+  expect(await testRedis.get(key)).toBeNull();
+  expect((await deleteReservation(userIds[0]!, concertId, "A1", reservationId)).statusCode).toBe(404);
+});
+
+test("canceling an expired reservation does not delete a newer hold by the same owner", async () => {
+  const concertId = concertIds[0]!;
+  const key = reservationKey(concertId, "A1");
+  const first = await postReservation(userIds[0]!, concertId, "A1");
+  const oldReservationId = first.json().reservationId as string;
+  await testRedis.pExpire(key, 20);
+  await Bun.sleep(60);
+  expect((await deleteReservation(userIds[0]!, concertId, "A1", oldReservationId)).statusCode).toBe(404);
+  const second = await postReservation(userIds[0]!, concertId, "A1");
+  expect(second.statusCode).toBe(201);
+  expect(second.json().reservationId).not.toBe(oldReservationId);
+  const replacement = await testRedis.get(key);
+
+  expect((await deleteReservation(userIds[0]!, concertId, "A1", oldReservationId)).statusCode).toBe(409);
+  expect(await testRedis.get(key)).toBe(replacement);
 });

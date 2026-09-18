@@ -3,6 +3,7 @@ import Fastify from "fastify";
 import { env } from "#src/config/env";
 import { registerAuthRoutes } from "#src/routes/auth";
 import { registerHealthRoute } from "#src/routes/health";
+import { registerHallsRoute } from "#src/routes/halls";
 import { registerMeRoute } from "#src/routes/me";
 import { registerConcertsRoute } from "#src/routes/concerts";
 import { registerReservationsRoute } from "#src/routes/reservations";
@@ -13,6 +14,7 @@ export async function buildApp() {
   registerAuthRoutes(app);
   registerHealthRoute(app);
   await app.register(async (v1) => {
+    registerHallsRoute(v1);
     registerMeRoute(v1);
     registerConcertsRoute(v1);
     registerReservationsRoute(v1);

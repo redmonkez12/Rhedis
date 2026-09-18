@@ -3,3 +3,4 @@ export const redisOnlyFavoritesKey = (userId: string) => `app:redis-only:favorit
 export const redisOnlyConcertsPopularity = () => `app:redis-only:concerts:popularity`;
 export const seatReservationKey = (concertId: string, seatId: string) =>
   `app:concert:${encodeURIComponent(concertId)}:seat:${encodeURIComponent(seatId)}:reservation`;
+export const layoutKey = (hallId: string) => `app:venue:${hallId}:layout`;

@@ -15,6 +15,7 @@
     "db:migrate": "bunx --bun drizzle-kit migrate",
     "db:seed": "bun src/db/seed.ts",
     "db:rebuild-popularity": "bun src/db/rebuild-popularity.ts",
+    "venue:seed-layout": "bun scripts/seed-venue-layout.ts",
     "worker:outbox": "bun src/workers/popularity-outbox.ts"
   },
   "dependencies": {

@@ -156,16 +156,19 @@ Repeat the request to check that the popularity score does not increase again.
 
 ## Temporary seat reservations
 
-Both endpoints require a Better Auth session and a seat belonging to the concert's hall:
+These endpoints require a Better Auth session and a seat belonging to the concert's hall:
 
 ```text
 POST /api/v1/concerts/:concertId/seats/:seatId/reservation
 GET  /api/v1/concerts/:concertId/seats/:seatId/reservation
+DELETE /api/v1/concerts/:concertId/seats/:seatId/reservations/:reservationId
 ```
 
 The POST stores the authenticated user's ID and a unique reservation ID as a JSON string in Redis. One `SET` with `NX` and `EX 60` creates the hold and its expiration atomically. It returns `201` with `reservationId`, or `409` when the seat is already held, including by the same user. A rejected attempt does not extend the existing hold.
 
 The GET returns `reserved` and `remainingSeconds` from Redis `TTL`. A missing key (`-2`) means the seat is free; a key without expiration (`-1`) is treated as a server error. Once the key expires, another POST can reserve the seat. The unversioned `/api/concerts/...` path is intentionally not exposed.
+
+The DELETE cancels the reservation only when both its ID and owner match. A Redis script checks and removes the key atomically, so an expired reservation cannot cause a newer hold to be deleted. It returns `204` on success, `404` for a missing or expired reservation, `403` when another user owns the current reservation, and `409` when the owner supplies an outdated reservation ID.
 
 This exercise models temporary holds only. Payments and permanent ticket ownership are outside its scope.
 
@@ -182,10 +185,10 @@ These are expected behaviors to verify, not a report of automated test results.
 - [ ] Simultaneous requests for the same free seat have exactly one winner.
 - [ ] Rejected requests do not refresh reservation TTL.
 - [ ] An expired reservation no longer blocks a new one.
+- [ ] Canceling an expired reservation does not remove a newer hold.
 
 ## Further learning goals
 
-- Safely cancel a reservation using its owner and reservation ID.
 - Model nested venue layouts with RedisJSON.
 - Practice cache-aside reads and invalidation.
 - Compare pipelines, transactions, and Lua scripts.
