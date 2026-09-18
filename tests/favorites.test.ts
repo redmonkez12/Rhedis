@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test";
-import { count, eq, inArray } from "drizzle-orm";
+import { and, count, eq, inArray } from "drizzle-orm";
 import Fastify, { type FastifyRequest } from "fastify";
 import { Client } from "pg";
 import { createClient } from "redis";
 import { env } from "#src/config/env";
+import type { VenueSeat } from "#src/services/venue";
 import { db } from "#src/db/drizzle";
 import { popularityOutboxChannel } from "#src/db/outbox-channel";
 import { postgres } from "#src/db/postgres";
@@ -28,16 +29,18 @@ const concertIds = [1, 2, 3, 4].map((number) => `test-${runId}-concert-${number}
 const userIds = ["alice", "bob", "carol", "dave"].map((name) => `test-${runId}-${name}`);
 const redisOnlyFavoritesKey = (userId: string) => `test:${runId}:redis-only:favorites:${userId}`;
 const reservationKey = (concertId: string, seatId: string) => `test:${runId}:concert:${concertId}:seat:${seatId}:reservation`;
+const layoutKey = (hallId: string) => `test:${runId}:venue:${hallId}:layout`;
 const redisKeys = [
   popularityKey,
   redisOnlyPopularityKey,
   ...userIds.map(redisOnlyFavoritesKey),
-  ...concertIds.flatMap((concertId) => ["A1", "A2", "A3"].map((seatId) => reservationKey(concertId, seatId))),
+  ...concertIds.flatMap((concertId) => ["A1", "A2", "A3", "B2"].map((seatId) => reservationKey(concertId, seatId))),
 ];
 const testHallName = `Test venue ${runId}`;
 let testHallId: string;
 let otherHallId: string;
 let failProjectionUpdate = false;
+let failSeatAppend = false;
 const routeRedis = {
   zAdd(key: string, member: { value: string; score: number }, options: { comparison: "GT" }) {
     if (failProjectionUpdate) return Promise.reject(new Error("Simulated Redis update failure"));
@@ -48,6 +51,14 @@ const routeRedis = {
   ttl: testRedis.ttl.bind(testRedis),
   eval: testRedis.eval.bind(testRedis),
   multi: testRedis.multi.bind(testRedis),
+  json: {
+    get: testRedis.json.get.bind(testRedis.json),
+    set: testRedis.json.set.bind(testRedis.json),
+    arrAppend(key: string, path: string, seat: VenueSeat) {
+      if (failSeatAppend) return Promise.reject(new Error("Simulated Redis append failure"));
+      return testRedis.json.arrAppend(key, path, seat);
+    },
+  },
 };
 
 mock.module("#src/db/redis", () => ({ redis: routeRedis }));
@@ -56,6 +67,7 @@ mock.module("#src/redis/keys", () => ({
   redisOnlyFavoritesKey,
   redisOnlyConcertsPopularity: () => redisOnlyPopularityKey,
   seatReservationKey: reservationKey,
+  layoutKey,
 }));
 mock.module("#src/auth/session", () => ({
   requireSession: async (request: FastifyRequest) => {
@@ -69,6 +81,7 @@ mock.module("#src/auth/session", () => ({
 
 const { registerMeRoute } = await import("../src/routes/me");
 const { registerConcertsRoute } = await import("../src/routes/concerts");
+const { registerHallsRoute } = await import("../src/routes/halls");
 const { registerReservationsRoute } = await import("../src/routes/reservations");
 const { rebuildConcertPopularity, syncConcertPopularity } = await import("../src/services/popularity");
 const { processNextPopularityOutboxEvent } = await import("../src/services/popularity-outbox");
@@ -76,10 +89,12 @@ const app = Fastify({ logger: false });
 app.register(async (v1) => {
   registerMeRoute(v1);
   registerConcertsRoute(v1);
+  registerHallsRoute(v1);
   registerReservationsRoute(v1);
 }, { prefix: "/api/v1" });
 
 beforeAll(async () => {
+  env.venueAdminUserIds.add(userIds[0]!);
   await testRedis.connect();
   for (const userId of userIds) {
     await postgres.query(
@@ -100,6 +115,7 @@ beforeAll(async () => {
   await db.insert(hallSeats).values([
     { hallId: testHallId, seatId: "A1" },
     { hallId: testHallId, seatId: "A2" },
+    { hallId: testHallId, seatId: "B1" },
     { hallId: otherHallId, seatId: "A3" },
   ]);
   await db.insert(concerts).values(concertIds.map((id) => ({
@@ -114,14 +130,21 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   failProjectionUpdate = false;
+  failSeatAppend = false;
   await db.delete(popularityOutbox).where(inArray(popularityOutbox.concertId, concertIds));
   await db.delete(concertFavorites).where(inArray(concertFavorites.concertId, concertIds));
+  await db.delete(hallSeats).where(and(
+    eq(hallSeats.hallId, testHallId),
+    inArray(hallSeats.seatId, ["A4", "B2"]),
+  ));
   await testRedis.del(redisKeys);
+  await testRedis.del(layoutKey(testHallId));
   await testRedis.zAdd(popularityKey, concertIds.map((value) => ({ value, score: 0 })));
   await testRedis.zAdd(redisOnlyPopularityKey, concertIds.map((value) => ({ value, score: 0 })));
 });
 
 afterAll(async () => {
+  env.venueAdminUserIds.delete(userIds[0]!);
   await app.close();
   await db.delete(popularityOutbox).where(inArray(popularityOutbox.concertId, concertIds));
   await db.delete(concertFavorites).where(inArray(concertFavorites.concertId, concertIds));
@@ -132,6 +155,7 @@ afterAll(async () => {
   await postgres.end();
   if (testRedis.isReady) {
     await testRedis.del(redisKeys);
+    await testRedis.del(layoutKey(testHallId));
     await testRedis.quit();
   } else if (testRedis.isOpen) {
     testRedis.destroy();
@@ -566,4 +590,192 @@ test("canceling an expired reservation does not delete a newer hold by the same 
 
   expect((await deleteReservation(userIds[0]!, concertId, "A1", oldReservationId)).statusCode).toBe(409);
   expect(await testRedis.get(key)).toBe(replacement);
+});
+
+async function seedTestLayout() {
+  await testRedis.json.set(layoutKey(testHallId), "$", {
+    name: testHallName,
+    sections: [
+      {
+        id: "floor",
+        seats: [
+          { id: "A1", category: "standard", accessible: true },
+          { id: "A2", category: "standard", accessible: false },
+        ],
+      },
+      {
+        id: "balcony",
+        seats: [{ id: "B1", category: "premium", accessible: false }],
+      },
+    ],
+  });
+}
+
+test("seat category endpoint updates the selected seat", async () => {
+  await seedTestLayout();
+  const url = `/api/v1/halls/${testHallId}/seats/A2/category`;
+
+  const unauthorized = await app.inject({ method: "PATCH", url, payload: { category: "premium" } });
+  expect(unauthorized.statusCode).toBe(401);
+
+  const forbidden = await app.inject({
+    method: "PATCH", url, headers: { "x-test-user-id": userIds[1]! }, payload: { category: "premium" },
+  });
+  expect(forbidden.statusCode).toBe(403);
+
+  const invalid = await app.inject({
+    method: "PATCH", url, headers: { "x-test-user-id": userIds[0]! }, payload: { category: "" },
+  });
+  expect(invalid.statusCode).toBe(400);
+
+  const updated = await app.inject({
+    method: "PATCH", url, headers: { "x-test-user-id": userIds[0]! }, payload: { category: "premium" },
+  });
+  expect(updated.statusCode).toBe(200);
+  expect(updated.json() as { id: string; category: string })
+    .toEqual({ id: "A2", category: "premium" });
+
+  const seats = await app.inject({ method: "GET", url: `/api/v1/halls/${testHallId}/seats` });
+  expect(seats.json() as VenueSeat[]).toEqual([
+    { id: "A1", category: "standard", accessible: true },
+    { id: "A2", category: "premium", accessible: false },
+    { id: "B1", category: "premium", accessible: false },
+  ]);
+
+  const accessible = await app.inject({ method: "GET", url: `/api/v1/halls/${testHallId}/seats/accessible` });
+  expect(accessible.json() as VenueSeat[]).toEqual([
+    { id: "A1", category: "standard", accessible: true },
+  ]);
+
+  const missingSeat = await app.inject({
+    method: "PATCH",
+    url: `/api/v1/halls/${testHallId}/seats/MISSING/category`,
+    headers: { "x-test-user-id": userIds[0]! },
+    payload: { category: "premium" },
+  });
+  expect(missingSeat.statusCode).toBe(404);
+
+  await testRedis.json.set(layoutKey(testHallId), "$.sections[0].seats", [
+    { id: "A2", category: "premium", accessible: false },
+    { id: "A1", category: "standard", accessible: true },
+  ]);
+  const reordered = await app.inject({
+    method: "PATCH",
+    url: `/api/v1/halls/${testHallId}/seats/A1/category`,
+    headers: { "x-test-user-id": userIds[0]! },
+    payload: { category: "vip" },
+  });
+  expect(reordered.statusCode).toBe(200);
+  expect(await testRedis.json.get(layoutKey(testHallId), { path: "$.sections[0].seats[*].category" }))
+    .toEqual(["premium", "vip"]);
+});
+
+test("append seat endpoint adds a seat only to an existing section", async () => {
+  const url = `/api/v1/halls/${testHallId}/sections/balcony/seats`;
+  const seat = { id: "B2", category: "premium", accessible: false };
+  const headers = { "x-test-user-id": userIds[0]! };
+
+  const missingLayout = await app.inject({ method: "POST", url, headers, payload: seat });
+  expect(missingLayout.statusCode).toBe(404);
+
+  await seedTestLayout();
+  const unauthorized = await app.inject({ method: "POST", url, payload: seat });
+  expect(unauthorized.statusCode).toBe(401);
+
+  const forbidden = await app.inject({
+    method: "POST", url, headers: { "x-test-user-id": userIds[1]! }, payload: seat,
+  });
+  expect(forbidden.statusCode).toBe(403);
+
+  const invalid = await app.inject({
+    method: "POST", url, headers, payload: { id: "B2", category: "premium" },
+  });
+  expect(invalid.statusCode).toBe(400);
+
+  const missingSection = await app.inject({
+    method: "POST",
+    url: `/api/v1/halls/${testHallId}/sections/missing/seats`,
+    headers,
+    payload: seat,
+  });
+  expect(missingSection.statusCode).toBe(404);
+  expect((await db.select().from(hallSeats).where(and(
+    eq(hallSeats.hallId, testHallId), eq(hallSeats.seatId, seat.id),
+  ))).length).toBe(0);
+
+  const created = await app.inject({ method: "POST", url, headers, payload: seat });
+  expect(created.statusCode).toBe(201);
+  expect(created.json() as VenueSeat).toEqual(seat);
+
+  const seats = await app.inject({ method: "GET", url: `/api/v1/halls/${testHallId}/seats` });
+  expect((seats.json() as VenueSeat[]).length).toBe(4);
+  expect(seats.json() as VenueSeat[]).toContainEqual(seat);
+
+  const reserved = await app.inject({
+    method: "POST",
+    url: `/api/v1/concerts/${concertIds[0]}/seats/B2/reservation`,
+    headers,
+  });
+  expect(reserved.statusCode).toBe(201);
+  expect(await testRedis.ttl(reservationKey(concertIds[0]!, "B2"))).toBeGreaterThan(0);
+
+  const duplicate = await app.inject({ method: "POST", url, headers, payload: seat });
+  expect(duplicate.statusCode).toBe(409);
+  const duplicateAcrossSections = await app.inject({
+    method: "POST", url, headers,
+    payload: { id: "A1", category: "premium", accessible: false },
+  });
+  expect(duplicateAcrossSections.statusCode).toBe(409);
+  expect(await testRedis.json.get(layoutKey(testHallId), { path: '$.sections[*].seats[?(@.id == "B2")]' }))
+    .toEqual([seat]);
+});
+
+test("concurrent appends of the same seat ID add it only once", async () => {
+  await seedTestLayout();
+  const request = () => app.inject({
+    method: "POST",
+    url: `/api/v1/halls/${testHallId}/sections/floor/seats`,
+    headers: { "x-test-user-id": userIds[0]! },
+    payload: { id: "A4", category: "standard", accessible: false },
+  });
+  const responses = await Promise.all([request(), request()]);
+  expect(responses.map((response) => response.statusCode).sort()).toEqual([201, 409]);
+  expect(await testRedis.json.get(layoutKey(testHallId), { path: '$.sections[*].seats[?(@.id == "A4")]' }))
+    .toEqual([{ id: "A4", category: "standard", accessible: false }]);
+  expect((await db.select().from(hallSeats).where(and(
+    eq(hallSeats.hallId, testHallId), eq(hallSeats.seatId, "A4"),
+  ))).length).toBe(1);
+});
+
+test("failed Redis append rolls back the new PostgreSQL seat", async () => {
+  await seedTestLayout();
+  failSeatAppend = true;
+  const response = await app.inject({
+    method: "POST",
+    url: `/api/v1/halls/${testHallId}/sections/floor/seats`,
+    headers: { "x-test-user-id": userIds[0]! },
+    payload: { id: "A4", category: "standard", accessible: false },
+  });
+  expect(response.statusCode).toBe(500);
+  expect((await db.select().from(hallSeats).where(and(
+    eq(hallSeats.hallId, testHallId), eq(hallSeats.seatId, "A4"),
+  ))).length).toBe(0);
+  expect(await testRedis.json.get(layoutKey(testHallId), { path: '$.sections[*].seats[?(@.id == "A4")]' }))
+    .toEqual([]);
+});
+
+test("duplicate seat IDs already in a layout cannot be updated together", async () => {
+  await seedTestLayout();
+  await testRedis.json.arrAppend(layoutKey(testHallId), '$.sections[?(@.id == "balcony")].seats', {
+    id: "A2", category: "standard", accessible: false,
+  });
+  const response = await app.inject({
+    method: "PATCH",
+    url: `/api/v1/halls/${testHallId}/seats/A2/category`,
+    headers: { "x-test-user-id": userIds[0]! },
+    payload: { category: "premium" },
+  });
+  expect(response.statusCode).toBe(409);
+  expect(await testRedis.json.get(layoutKey(testHallId), { path: '$.sections[*].seats[?(@.id == "A2")].category' }))
+    .toEqual(["standard", "standard"]);
 });

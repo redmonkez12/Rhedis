@@ -22,6 +22,10 @@ function origin(name: string): string {
   return value;
 }
 
+function userIds(name: string): Set<string> {
+  return new Set((process.env[name] ?? "").split(",").map((id) => id.trim()).filter(Boolean));
+}
+
 const secret = required("BETTER_AUTH_SECRET");
 if (secret.length < 32) throw new Error("BETTER_AUTH_SECRET must contain at least 32 characters");
 
@@ -37,5 +41,5 @@ export const env = {
   authUrl: origin("BETTER_AUTH_URL"),
   frontendOrigin: origin("FRONTEND_ORIGIN"),
   authSecret: secret,
+  venueAdminUserIds: userIds("VENUE_ADMIN_USER_IDS"),
 };
-

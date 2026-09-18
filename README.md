@@ -43,6 +43,12 @@ Run `bun run db:migrate` before `bun run db:seed`. The migration links existing 
 
 The demo users are `alice@example.test`, `bob@example.test`, and `carol@example.test`. All use the password `TestPass123!` by default. Set `SEED_USER_PASSWORD` when running the seed to choose another password for newly created users. Existing accounts and their passwords are left as they are. The seed refuses to run with `NODE_ENV=production` because these accounts have known credentials.
 
+### Venue layout in RedisJSON
+
+Run `bun run venue:seed-layout` to save the Main Hall layout under `app:venue:<hall UUID>:layout`. Layout reads are public. Editing a seat category or appending a seat through `/api/v1/halls/:id` requires a signed-in user whose Better Auth user ID is listed in `VENUE_ADMIN_USER_IDS` (comma-separated in `.env`). An empty list denies all layout writes. Use `/api/v1/me` to see your user ID.
+
+Appending a seat adds its ID to `hall_seats` in PostgreSQL and its properties to RedisJSON, so the reservation routes can recognize it. A duplicate seat ID in the hall returns `409`; a missing layout or section returns `404`. Temporary reservations remain separate Redis string keys with their own expiration.
+
 ## Redis data model
 
 The following names illustrate the key convention; the application's key helpers define the actual names.
